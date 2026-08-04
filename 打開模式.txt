@@ -1,0 +1,4 @@
+打開模式
+
+cd "C:\Users\User\OneDrive - 長庚大學\桌面\資料庫"
+streamlit run local_vector_web.py
