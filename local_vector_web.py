@@ -284,12 +284,19 @@ def generate_advanced_sql(query_text, matched_tables):
             where_conds.append(c)
             seen.add(c)
 
-    # 學院過濾（支援商管、醫學、文法、理工、設計等關鍵字）
-    college_keywords = ["商管", "商學", "商学院", "商管学院", "醫學", "医学院", "文法", "理工", "設計", "设计"]
-    for col_kw in college_keywords:
-        if col_kw in query_clean:
-            root_kw = col_kw[:2]
-            c = f"({student_table}.College_Faculty LIKE '%{root_kw}%')"
+   # 學院過濾（智慧相容繁簡：商、醫、理、文、設）
+    college_map = {
+        "商": ["%商%", "%管理%"],
+        "醫": ["%醫%", "%医%"],
+        "理": ["%理%", "%工%"],
+        "文": ["%文%", "%法%"],
+        "設": ["%設%", "%设%"]
+    }
+    
+    for key, patterns in college_map.items():
+        if key in query_clean or (key == "醫" and "医" in query_clean) or (key == "設" and "设" in query_clean):
+            sub_conds = [f"{student_table}.College_Faculty LIKE '{p}'" for p in patterns]
+            c = f"({' OR '.join(sub_conds)})"
             if c not in seen:
                 where_conds.append(c)
                 seen.add(c)
