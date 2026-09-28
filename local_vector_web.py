@@ -40,7 +40,7 @@ def load_all_data():
     df_qustionnaire_result = pd.read_csv(CSV_RESULT, encoding="utf-8-sig")
     df_questionnaire_questions = pd.read_csv(CSV_QUESTION, encoding="utf-8-sig")
 
-    # 清洗學院欄：移除 () ' ; 等特殊符號
+    # 清洗學院欄位：移除多餘符號
     if "College/Faculty" in df_student.columns:
         df_student["College/Faculty"] = (
             df_student["College/Faculty"]
@@ -49,7 +49,7 @@ def load_all_data():
             .str.strip()
         )
 
-    # 學生表欄位重新命名（相容繁簡原始欄位）
+    # 學生表欄位重命名（兼顧原始繁簡欄位）
     student_col_map = {
         "學號": "StudentID",
         "学号": "StudentID",
@@ -64,7 +64,7 @@ def load_all_data():
     }
     df_student = df_student.rename(columns=student_col_map)
 
-    # 問卷作答表欄位重新命名
+    # 問卷結果表欄位重命名
     result_col_map = {
         "學生學號": "StudentID",
         "學生編號": "StudentID",
@@ -92,7 +92,7 @@ def load_all_data():
     }
     df_qustionnaire_result = df_qustionnaire_result.rename(columns=result_col_map)
 
-    # 題目表欄位重新命名
+    # 題目表欄位重命名
     question_col_map = {
         "題目編號": "id",
         "题目编号": "id",
@@ -111,7 +111,7 @@ def load_all_data():
 
 student, qustionnaire_result, questionnaire_questions = load_all_data()
 
-# pandasql 執行函數
+# pandasql 執行環境
 def pysqldf(sql):
     env = {
         "student": student,
@@ -120,14 +120,14 @@ def pysqldf(sql):
     }
     return sqldf(sql, env)
 
-# ===================== 關鍵字配置（全繁體化） =====================
+# ===================== 關鍵字與欄位對應（全繁體） =====================
 TABLE_KEYWORDS = {
     "student": {
-        "keywords": ["學生", "姓名", "學號", "性別", "年級", "學院", "學校"],
+        "keywords": ["學生", "姓名", "學號", "性別", "年級", "學院", "學校", "男生", "女生"],
         "weight": 10.0
     },
     "qustionnaire_result": {
-        "keywords": ["使用時長", "螢幕", "遊戲", "睡眠", "解鎖", "焦慮", "社交", "影片"],
+        "keywords": ["使用時長", "螢幕", "遊戲", "睡眠", "解鎖", "焦慮", "社交", "影片", "娛樂"],
         "weight": 10.0
     },
     "questionnaire_questions": {
@@ -168,13 +168,13 @@ FIELD_MAP = {
 GT_WORDS = ["超過", "大於", "以上", "多於"]
 LT_WORDS = ["低於", "小於", "以下", "少於"]
 AGG_KEYWORDS = {
-    "COUNT": ["統計", "人數"],
+    "COUNT": ["統計", "人數", "總數"],
     "AVG": ["平均"],
-    "MAX": ["最高"],
-    "MIN": ["最低"]
+    "MAX": ["最高", "最多"],
+    "MIN": ["最低", "最少"]
 }
 
-# ===================== 輕量向量語意比對（免外部下載，穩定防崩） =====================
+# ===================== 輕量向量比對（0 外部下載依賴） =====================
 DOCS_SCHEMA = {
     "student": "學生基本資料表 包含學號 姓名 性別 年級 學校類型 學院系所 公立 私立 男 女",
     "qustionnaire_result": "學生手機使用與問卷作答結果表 包含日均螢幕總時長 社交媒體時長 遊戲時長 睡前使用時長 解鎖次數 睡眠時長 焦慮程度 自評",
@@ -193,12 +193,14 @@ tfidf_vec, tfidf_matrix, table_keys = init_vector_matcher()
 
 # ===================== 自然語言轉 SQL 核心函數 =====================
 def generate_advanced_sql(query_text, matched_tables):
-    student_table = "student" if "student" in matched_tables else None
-    secondary_table = "qustionnaire_result" if "qustionnaire_result" in matched_tables else None
+    student_table = "student"
+    # 只有查詢涉及手機使用、睡眠、心理自評等指標時才需 JOIN 問卷結果表
+    secondary_table = "qustionnaire_result" if any(k in query_text for k in ["時長", "时长", "螢幕", "屏幕", "遊戲", "游戏", "睡眠", "解鎖", "解锁", "焦慮", "焦虑", "自評", "自评", "社交", "影片"]) else None
+
     query_clean = re.sub(r"^\d+\.\s*", "", query_text)
 
     def clean_text(txt):
-        remove = ["日均", "時長", "小時", "次數", "總", "使用", "的", "學生"]
+        remove = ["日均", "時長", "小時", "次數", "總", "使用", "的", "學生", "人數", "人数"]
         for w in remove:
             txt = txt.replace(w, "")
         return txt.strip()
@@ -206,42 +208,47 @@ def generate_advanced_sql(query_text, matched_tables):
     is_agg = False
     group_fields = []
     agg_funcs = []
+    where_conds = []
+    seen = set()
 
-    # 判斷是否為統計彙總查詢
+    # 1. 判斷統計聚合（COUNT / AVG / MAX / MIN）
     if any(k in query_clean for k in AGG_KEYWORDS["COUNT"] + AGG_KEYWORDS["AVG"] + AGG_KEYWORDS["MAX"] + AGG_KEYWORDS["MIN"]):
         is_agg = True
         target_col = None
-        for kw, col in FIELD_MAP["qustionnaire_result"].items():
-            if clean_text(kw) in clean_text(query_clean):
-                target_col = f"{secondary_table}.{col}"
-                break
+        if secondary_table:
+            for kw, col in FIELD_MAP["qustionnaire_result"].items():
+                if clean_text(kw) in clean_text(query_clean):
+                    target_col = f"{secondary_table}.{col}"
+                    break
 
         if "平均" in query_clean and target_col:
             agg_funcs.append(f"AVG({target_col}) AS 平均值")
-        elif "最高" in query_clean and target_col:
+        elif ("最高" in query_clean or "最多" in query_clean) and target_col:
             agg_funcs.append(f"MAX({target_col}) AS 最大值")
-        elif "最低" in query_clean and target_col:
+        elif ("最低" in query_clean or "最少" in query_clean) and target_col:
             agg_funcs.append(f"MIN({target_col}) AS 最小值")
         else:
             agg_funcs.append("COUNT(*) AS 總人數")
 
-        # 分組欄位
-        if "性別" in query_clean:
-            group_fields.append(f"{student_table}.gender")
-        if "年級" in query_clean:
+        # 僅在明確提出「各」年級、「各」學院等分組維度時才 GROUP BY
+        if "各年級" in query_clean or "各年级" in query_clean:
             group_fields.append(f"{student_table}.grade")
-        if "學院" in query_clean:
+        if "各性別" in query_clean or "各性别" in query_clean:
+            group_fields.append(f"{student_table}.gender")
+        if "各學院" in query_clean or "各学院" in query_clean:
             group_fields.append(f"{student_table}.College_Faculty")
-        if "公立" in query_clean or "私立" in query_clean:
+        if "各學校" in query_clean or "各學校類型" in query_clean:
             group_fields.append(f"{student_table}.SchoolType")
 
-    # 選取欄位
+    # 2. SELECT 欄位組裝
     if is_agg:
         select_part = ", ".join(group_fields + agg_funcs)
     else:
         select_list = [
             f"{student_table}.StudentID AS 學號",
             f"{student_table}.Name AS 姓名",
+            f"{student_table}.gender AS 性別",
+            f"{student_table}.grade AS 年級",
             f"{student_table}.College_Faculty AS 學院"
         ]
         if secondary_table:
@@ -252,43 +259,43 @@ def generate_advanced_sql(query_text, matched_tables):
 
     select_clause = f"SELECT {select_part}"
 
-    # WHERE 條件收集
-    where_conds = []
-    seen = set()
+    # 3. WHERE 篩選條件提取（無論是否統計查詢皆嚴格過濾）
+    # 性別過濾
+    if "男" in query_clean:
+        c = f"{student_table}.gender IN ('男', '男生')"
+        if c not in seen:
+            where_conds.append(c)
+            seen.add(c)
+    if "女" in query_clean:
+        c = f"{student_table}.gender IN ('女', '女生')"
+        if c not in seen:
+            where_conds.append(c)
+            seen.add(c)
 
-    if not is_agg:
-        # 性別篩選
-        if "男" in query_clean:
-            c = f"{student_table}.gender = '男'"
-            if c not in seen:
-                where_conds.append(c)
-                seen.add(c)
-        if "女" in query_clean:
-            c = f"{student_table}.gender = '女'"
-            if c not in seen:
-                where_conds.append(c)
-                seen.add(c)
+    # 體系過濾
+    if "公立" in query_clean:
+        c = f"{student_table}.SchoolType LIKE '%公立%'"
+        if c not in seen:
+            where_conds.append(c)
+            seen.add(c)
+    if "私立" in query_clean:
+        c = f"{student_table}.SchoolType LIKE '%私立%'"
+        if c not in seen:
+            where_conds.append(c)
+            seen.add(c)
 
-        # 學校體系
-        if "公立" in query_clean:
-            c = f"{student_table}.SchoolType = '公立'"
+    # 學院過濾（支援商管、醫學、文法、理工、設計等關鍵字）
+    college_keywords = ["商管", "商學", "商学院", "商管学院", "醫學", "医学院", "文法", "理工", "設計", "设计"]
+    for col_kw in college_keywords:
+        if col_kw in query_clean:
+            root_kw = col_kw[:2]
+            c = f"({student_table}.College_Faculty LIKE '%{root_kw}%')"
             if c not in seen:
                 where_conds.append(c)
                 seen.add(c)
-        if "私立" in query_clean:
-            c = f"{student_table}.SchoolType = '私立'"
-            if c not in seen:
-                where_conds.append(c)
-                seen.add(c)
+            break
 
-        # 學院篩選
-        if "商管學院" in query_clean or "商學院" in query_clean or "商管学院" in query_clean:
-            c = f"({student_table}.College_Faculty LIKE '%商管%' OR {student_table}.College_Faculty LIKE '%管理%')"
-            if c not in seen:
-                where_conds.append(c)
-                seen.add(c)
-
-    # 數值區間判斷
+    # 數值區間過濾
     if secondary_table:
         range_match = re.search(r"(\d+\.?\d*)\s*[~至-]\s*(\d+)", query_clean)
         if range_match:
@@ -306,16 +313,12 @@ def generate_advanced_sql(query_text, matched_tables):
                         where_conds.append(c2)
                         seen.add(c2)
 
-        # 大於 / 小於判斷
+        # 數值大於/小於過濾
         num_match = re.search(r"(超過|大於|小於|等於|大于|小于)\s*(\d+\.?\d*)", query_clean)
         if num_match:
             op_txt = num_match.group(1)
             num = num_match.group(2)
-            op = "="
-            if op_txt in GT_WORDS or op_txt == "大于":
-                op = ">"
-            if op_txt in LT_WORDS or op_txt == "小于":
-                op = "<"
+            op = ">" if op_txt in GT_WORDS or op_txt == "大于" else ("<" if op_txt in LT_WORDS or op_txt == "小于" else "=")
             for kw, col in FIELD_MAP["qustionnaire_result"].items():
                 if clean_text(kw) in clean_text(query_clean):
                     c = f"{secondary_table}.{col} {op} {num}"
@@ -323,7 +326,7 @@ def generate_advanced_sql(query_text, matched_tables):
                         where_conds.append(c)
                         seen.add(c)
 
-        # 自評分數篩選
+        # 自評分數過濾
         score_match = re.search(r"自評.*(\d+)", query_clean)
         if score_match:
             s = score_match.group(1)
@@ -334,18 +337,14 @@ def generate_advanced_sql(query_text, matched_tables):
                         where_conds.append(c)
                         seen.add(c)
 
-    # FROM & JOIN
+    # 4. 拼裝 SQL 語句
     from_clause = f"FROM {student_table}"
     if secondary_table:
         from_clause += f" JOIN {secondary_table} ON {student_table}.StudentID = {secondary_table}.StudentID"
 
-    # WHERE 拼接
     where_clause = f"WHERE {' AND '.join(where_conds)}" if where_conds else ""
-
-    # GROUP BY
     group_clause = f"GROUP BY {', '.join(group_fields)}" if (is_agg and group_fields) else ""
 
-    # 組合完整 SQL
     full_sql = f"{select_clause} {from_clause}"
     if where_clause:
         full_sql += f" {where_clause}"
@@ -376,7 +375,7 @@ with st.sidebar.expander("📜 查詢紀錄"):
 
 # ===================== 主查詢介面 =====================
 with st.form("query_form"):
-    user_input = st.text_input("請輸入查詢需求：", placeholder="範例：查詢商管學院女生、統計各年級平均手機使用時長")
+    user_input = st.text_input("請輸入查詢需求：", placeholder="範例：商學院總人數、查詢商學院的女生、統計各年級平均螢幕使用時長")
     submit_btn = st.form_submit_button("執行查詢")
 
 if submit_btn:
@@ -385,7 +384,7 @@ if submit_btn:
     if not user_input.strip():
         st.warning("請輸入查詢內容！")
     else:
-        with st.spinner("正在解析並查詢資料..."):
+        with st.spinner("正在解析語意並執行查詢..."):
             # 1. 規則關鍵字計分
             table_score = {}
             for tbl, rule in TABLE_KEYWORDS.items():
@@ -406,7 +405,7 @@ if submit_btn:
             sorted_tbl = sorted(table_score.items(), key=lambda x: x[1], reverse=True)
             match_tables = [t for t, s in sorted_tbl]
 
-            # 4. 生成 SQL
+            # 4. 生成精準 SQL
             sql_text = generate_advanced_sql(user_input, match_tables)
 
             # 5. 儲存紀錄
