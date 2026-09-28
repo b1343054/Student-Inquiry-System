@@ -335,7 +335,7 @@ def generate_advanced_sql(query_text, matched_tables):
                         seen.add(c2)
 
         # 數值大於/小於過濾
-        num_match = re.search(r"(超過|大於|小於|等於|大于|小于)\s*(\d+\.?\d*)", query_clean)
+        num_match = re.search(r"(超過|大於|小於|等於|大于|小于|高於|低於)\s*(\d+\.?\d*)", query_clean)
         if num_match:
             op_txt = num_match.group(1)
             num = num_match.group(2)
