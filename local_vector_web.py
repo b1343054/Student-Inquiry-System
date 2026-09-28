@@ -1,8 +1,8 @@
 import streamlit as st
-import chromadb
-from sklearn.feature_extraction.text import TfidfVectorizer
 import pandas as pd
 from pandasql import sqldf
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 import re
 import json
 import os
@@ -17,10 +17,6 @@ HISTORY_FILE = "query_history.json"
 # 頁面設定
 st.set_page_config(page_title="學生手機使用查詢系統", layout="wide")
 st.title("🔍 學生手機螢幕使用資料查詢工具")
-
-# 清空舊快取
-st.cache_data.clear()
-st.cache_resource.clear()
 
 # 計數器
 if "interaction_count" not in st.session_state:
@@ -38,6 +34,7 @@ if "query_history" not in st.session_state:
         st.session_state.query_history = []
 
 # ===================== 載入並清洗 CSV 資料 =====================
+@st.cache_data
 def load_all_data():
     df_student = pd.read_csv(CSV_STUDENT, encoding="utf-8-sig")
     df_qustionnaire_result = pd.read_csv(CSV_RESULT, encoding="utf-8-sig")
@@ -112,7 +109,6 @@ def load_all_data():
 
     return df_student, df_qustionnaire_result, df_questionnaire_questions
 
-# 載入全域資料
 student, qustionnaire_result, questionnaire_questions = load_all_data()
 
 # pandasql 執行函數
@@ -178,43 +174,22 @@ AGG_KEYWORDS = {
     "MIN": ["最低"]
 }
 
-# ===================== 向量庫初始化（支援雲端自動重建） =====================
+# ===================== 輕量向量語意比對（免外部下載，穩定防崩） =====================
+DOCS_SCHEMA = {
+    "student": "學生基本資料表 包含學號 姓名 性別 年級 學校類型 學院系所 公立 私立 男 女",
+    "qustionnaire_result": "學生手機使用與問卷作答結果表 包含日均螢幕總時長 社交媒體時長 遊戲時長 睡前使用時長 解鎖次數 睡眠時長 焦慮程度 自評",
+    "questionnaire_questions": "問卷題目表 紀錄題目編號 題目內容 所屬問卷名稱 選項列表 答案類型"
+}
+
 @st.cache_resource
-def init_vector():
-    client = chromadb.PersistentClient(path="./chroma_db")
-    
-    # 預設的綱要說明文本，若雲端無資料夾時自動建置
-    default_docs = [
-        "學生基本資料表，包含學號、姓名、性別、年級、學校類型、學院系所等基本背景資訊。",
-        "學生手機使用與問卷作答結果表，包含日均螢幕總時長、社交媒體時長、遊戲時長、睡前使用時長、解鎖次數、睡眠時長與自評焦慮等數值。",
-        "問卷題目表，紀錄題目編號、題目內容、所屬問卷名稱、選項列表與答案類型等結構。"
-    ]
-    default_metadatas = [
-        {"table_name": "student"},
-        {"table_name": "qustionnaire_result"},
-        {"table_name": "questionnaire_questions"}
-    ]
-    default_ids = ["student_meta", "result_meta", "questions_meta"]
+def init_vector_matcher():
+    tables = list(DOCS_SCHEMA.keys())
+    texts = list(DOCS_SCHEMA.values())
+    tfidf = TfidfVectorizer()
+    tfidf_matrix = tfidf.fit_transform(texts)
+    return tfidf, tfidf_matrix, tables
 
-    # 嘗試讀取，不存在則直接自動建立並灌入基礎向量資料
-    try:
-        coll = client.get_collection("db_schema_collection")
-        data = coll.get()
-        if not data["documents"]:
-            coll.add(documents=default_docs, metadatas=default_metadatas, ids=default_ids)
-            docs = default_docs
-        else:
-            docs = data["documents"]
-    except Exception:
-        coll = client.create_collection("db_schema_collection")
-        coll.add(documents=default_docs, metadatas=default_metadatas, ids=default_ids)
-        docs = default_docs
-
-    vec = TfidfVectorizer()
-    vec.fit(docs)
-    return coll, vec
-
-collection, vectorizer = init_vector()
+tfidf_vec, tfidf_matrix, table_keys = init_vector_matcher()
 
 # ===================== 自然語言轉 SQL 核心函數 =====================
 def generate_advanced_sql(query_text, matched_tables):
@@ -306,8 +281,8 @@ def generate_advanced_sql(query_text, matched_tables):
                 where_conds.append(c)
                 seen.add(c)
 
-        # 學院篩選（支援商管學院等常見學院名稱）
-        if "商管學院" in query_clean or "商管学院" in query_clean:
+        # 學院篩選
+        if "商管學院" in query_clean or "商學院" in query_clean or "商管学院" in query_clean:
             c = f"({student_table}.College_Faculty LIKE '%商管%' OR {student_table}.College_Faculty LIKE '%管理%')"
             if c not in seen:
                 where_conds.append(c)
@@ -411,30 +386,30 @@ if submit_btn:
         st.warning("請輸入查詢內容！")
     else:
         with st.spinner("正在解析並查詢資料..."):
-            # 表匹配計算
+            # 1. 規則關鍵字計分
             table_score = {}
             for tbl, rule in TABLE_KEYWORDS.items():
                 sc = sum(10 for k in rule["keywords"] if k in user_input)
                 table_score[tbl] = sc
 
-            # 向量匹配，過濾不存在的 table_name
-            vec_in = vectorizer.transform([user_input]).toarray()
-            res = collection.query(query_embeddings=vec_in, n_results=3)
+            # 2. 向量餘弦相似度加權（TF-IDF）
+            try:
+                user_vec = tfidf_vec.transform([user_input])
+                sims = cosine_similarity(user_vec, tfidf_matrix)[0]
+                for idx, sim in enumerate(sims):
+                    tname = table_keys[idx]
+                    table_score[tname] += round(sim * 5, 2)
+            except Exception:
+                pass
 
-            if res["metadatas"] and len(res["metadatas"][0]) > 0:
-                for idx, dist in enumerate(res["distances"][0]):
-                    tname = res["metadatas"][0][idx]["table_name"]
-                    if tname in table_score:
-                        table_score[tname] += round(5 - dist, 2)
-
-            # 排序匹配表
+            # 3. 排序匹配資料表
             sorted_tbl = sorted(table_score.items(), key=lambda x: x[1], reverse=True)
             match_tables = [t for t, s in sorted_tbl]
 
-            # 產生 SQL
+            # 4. 生成 SQL
             sql_text = generate_advanced_sql(user_input, match_tables)
 
-            # 儲存紀錄
+            # 5. 儲存紀錄
             new_rec = {
                 "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "query": user_input,
@@ -449,7 +424,7 @@ if submit_btn:
             except Exception:
                 pass
 
-            # 頁面輸出
+            # 6. 頁面結果輸出
             st.success("查詢語句生成完畢")
             st.subheader("資料表匹配分數")
             for t, s in sorted_tbl:
