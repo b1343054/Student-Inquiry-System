@@ -29,18 +29,21 @@ if "interaction_count" not in st.session_state:
 # 讀取查詢歷史
 if "query_history" not in st.session_state:
     if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            st.session_state.query_history = json.load(f)
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                st.session_state.query_history = json.load(f)
+        except Exception:
+            st.session_state.query_history = []
     else:
         st.session_state.query_history = []
 
-# ===================== 載入並清洗CSV資料 =====================
+# ===================== 載入並清洗 CSV 資料 =====================
 def load_all_data():
     df_student = pd.read_csv(CSV_STUDENT, encoding="utf-8-sig")
     df_qustionnaire_result = pd.read_csv(CSV_RESULT, encoding="utf-8-sig")
     df_questionnaire_questions = pd.read_csv(CSV_QUESTION, encoding="utf-8-sig")
 
-    # 清洗學院欄：移除 () ' ; 等髒符號
+    # 清洗學院欄：移除 () ' ; 等特殊符號
     if "College/Faculty" in df_student.columns:
         df_student["College/Faculty"] = (
             df_student["College/Faculty"]
@@ -49,7 +52,7 @@ def load_all_data():
             .str.strip()
         )
 
-    # 學生表欄位重命名
+    # 學生表欄位重新命名（相容繁簡原始欄位）
     student_col_map = {
         "學號": "StudentID",
         "学号": "StudentID",
@@ -64,7 +67,7 @@ def load_all_data():
     }
     df_student = df_student.rename(columns=student_col_map)
 
-    # 問卷作答表欄位重命名
+    # 問卷作答表欄位重新命名
     result_col_map = {
         "學生學號": "StudentID",
         "學生編號": "StudentID",
@@ -92,7 +95,7 @@ def load_all_data():
     }
     df_qustionnaire_result = df_qustionnaire_result.rename(columns=result_col_map)
 
-    # 題目表欄位重命名
+    # 題目表欄位重新命名
     question_col_map = {
         "題目編號": "id",
         "题目编号": "id",
@@ -106,12 +109,6 @@ def load_all_data():
         "题目选项列表": "answer_options"
     }
     df_questionnaire_questions = df_questionnaire_questions.rename(columns=question_col_map)
-
-    # 除錯輸出
-    print("===== student 清洗後欄位 =====")
-    print(df_student.columns.tolist())
-    print("===== result 清洗後欄位 =====")
-    print(df_qustionnaire_result.columns.tolist())
 
     return df_student, df_qustionnaire_result, df_questionnaire_questions
 
@@ -127,14 +124,14 @@ def pysqldf(sql):
     }
     return sqldf(sql, env)
 
-# ===================== 關鍵字配置 =====================
+# ===================== 關鍵字配置（全繁體化） =====================
 TABLE_KEYWORDS = {
     "student": {
-        "keywords": ["學生", "学生", "姓名", "學號", "性別", "年級", "學院", "學校"],
+        "keywords": ["學生", "姓名", "學號", "性別", "年級", "學院", "學校"],
         "weight": 10.0
     },
     "qustionnaire_result": {
-        "keywords": ["使用時長", "螢幕", "遊戲", "睡眠", "解鎖", "焦慮"],
+        "keywords": ["使用時長", "螢幕", "遊戲", "睡眠", "解鎖", "焦慮", "社交", "影片"],
         "weight": 10.0
     },
     "questionnaire_questions": {
@@ -172,8 +169,8 @@ FIELD_MAP = {
     }
 }
 
-GT_WORDS = ["超過", "超过", "大於", "大于", "以上", "多於", "多于"]
-LT_WORDS = ["低於", "低于", "小於", "小于", "以下", "少於", "少于"]
+GT_WORDS = ["超過", "大於", "以上", "多於"]
+LT_WORDS = ["低於", "小於", "以下", "少於"]
 AGG_KEYWORDS = {
     "COUNT": ["統計", "人數"],
     "AVG": ["平均"],
@@ -181,26 +178,52 @@ AGG_KEYWORDS = {
     "MIN": ["最低"]
 }
 
-# ===================== 向量庫初始化 =====================
+# ===================== 向量庫初始化（支援雲端自動重建） =====================
 @st.cache_resource
 def init_vector():
     client = chromadb.PersistentClient(path="./chroma_db")
-    coll = client.get_collection("db_schema_collection")
-    docs = coll.get()["documents"]
+    
+    # 預設的綱要說明文本，若雲端無資料夾時自動建置
+    default_docs = [
+        "學生基本資料表，包含學號、姓名、性別、年級、學校類型、學院系所等基本背景資訊。",
+        "學生手機使用與問卷作答結果表，包含日均螢幕總時長、社交媒體時長、遊戲時長、睡前使用時長、解鎖次數、睡眠時長與自評焦慮等數值。",
+        "問卷題目表，紀錄題目編號、題目內容、所屬問卷名稱、選項列表與答案類型等結構。"
+    ]
+    default_metadatas = [
+        {"table_name": "student"},
+        {"table_name": "qustionnaire_result"},
+        {"table_name": "questionnaire_questions"}
+    ]
+    default_ids = ["student_meta", "result_meta", "questions_meta"]
+
+    # 嘗試讀取，不存在則直接自動建立並灌入基礎向量資料
+    try:
+        coll = client.get_collection("db_schema_collection")
+        data = coll.get()
+        if not data["documents"]:
+            coll.add(documents=default_docs, metadatas=default_metadatas, ids=default_ids)
+            docs = default_docs
+        else:
+            docs = data["documents"]
+    except Exception:
+        coll = client.create_collection("db_schema_collection")
+        coll.add(documents=default_docs, metadatas=default_metadatas, ids=default_ids)
+        docs = default_docs
+
     vec = TfidfVectorizer()
     vec.fit(docs)
     return coll, vec
 
 collection, vectorizer = init_vector()
 
-# ===================== 自然語言轉SQL核心函數 =====================
+# ===================== 自然語言轉 SQL 核心函數 =====================
 def generate_advanced_sql(query_text, matched_tables):
     student_table = "student" if "student" in matched_tables else None
     secondary_table = "qustionnaire_result" if "qustionnaire_result" in matched_tables else None
     query_clean = re.sub(r"^\d+\.\s*", "", query_text)
 
     def clean_text(txt):
-        remove = ["日均", "時長", "小时", "次數", "總", "使用", "的", "學生"]
+        remove = ["日均", "時長", "小時", "次數", "總", "使用", "的", "學生"]
         for w in remove:
             txt = txt.replace(w, "")
         return txt.strip()
@@ -209,7 +232,7 @@ def generate_advanced_sql(query_text, matched_tables):
     group_fields = []
     agg_funcs = []
 
-    # 判斷是否統計查詢
+    # 判斷是否為統計彙總查詢
     if any(k in query_clean for k in AGG_KEYWORDS["COUNT"] + AGG_KEYWORDS["AVG"] + AGG_KEYWORDS["MAX"] + AGG_KEYWORDS["MIN"]):
         is_agg = True
         target_col = None
@@ -254,7 +277,7 @@ def generate_advanced_sql(query_text, matched_tables):
 
     select_clause = f"SELECT {select_part}"
 
-    # WHERE條件收集
+    # WHERE 條件收集
     where_conds = []
     seen = set()
 
@@ -271,7 +294,7 @@ def generate_advanced_sql(query_text, matched_tables):
                 where_conds.append(c)
                 seen.add(c)
 
-        # 公立私立
+        # 學校體系
         if "公立" in query_clean:
             c = f"{student_table}.SchoolType = '公立'"
             if c not in seen:
@@ -283,9 +306,9 @@ def generate_advanced_sql(query_text, matched_tables):
                 where_conds.append(c)
                 seen.add(c)
 
-        # 學院篩選
-        if "商管學院" in query_clean:
-            c = f"{student_table}.College_Faculty = '商管学院'"
+        # 學院篩選（支援商管學院等常見學院名稱）
+        if "商管學院" in query_clean or "商管学院" in query_clean:
+            c = f"({student_table}.College_Faculty LIKE '%商管%' OR {student_table}.College_Faculty LIKE '%管理%')"
             if c not in seen:
                 where_conds.append(c)
                 seen.add(c)
@@ -308,15 +331,15 @@ def generate_advanced_sql(query_text, matched_tables):
                         where_conds.append(c2)
                         seen.add(c2)
 
-        # 大於/小於判斷
-        num_match = re.search(r"(超過|大於|小於|等於)\s*(\d+\.?\d*)", query_clean)
+        # 大於 / 小於判斷
+        num_match = re.search(r"(超過|大於|小於|等於|大于|小于)\s*(\d+\.?\d*)", query_clean)
         if num_match:
             op_txt = num_match.group(1)
             num = num_match.group(2)
             op = "="
-            if op_txt in GT_WORDS:
+            if op_txt in GT_WORDS or op_txt == "大于":
                 op = ">"
-            if op_txt in LT_WORDS:
+            if op_txt in LT_WORDS or op_txt == "小于":
                 op = "<"
             for kw, col in FIELD_MAP["qustionnaire_result"].items():
                 if clean_text(kw) in clean_text(query_clean):
@@ -341,13 +364,13 @@ def generate_advanced_sql(query_text, matched_tables):
     if secondary_table:
         from_clause += f" JOIN {secondary_table} ON {student_table}.StudentID = {secondary_table}.StudentID"
 
-    # WHERE拼接
+    # WHERE 拼接
     where_clause = f"WHERE {' AND '.join(where_conds)}" if where_conds else ""
 
     # GROUP BY
     group_clause = f"GROUP BY {', '.join(group_fields)}" if (is_agg and group_fields) else ""
 
-    # 組合完整SQL
+    # 組合完整 SQL
     full_sql = f"{select_clause} {from_clause}"
     if where_clause:
         full_sql += f" {where_clause}"
@@ -394,20 +417,21 @@ if submit_btn:
                 sc = sum(10 for k in rule["keywords"] if k in user_input)
                 table_score[tbl] = sc
 
-            # 向量匹配，過濾不存在的table_name
+            # 向量匹配，過濾不存在的 table_name
             vec_in = vectorizer.transform([user_input]).toarray()
-            res = collection.query(query_embeddings=vec_in, n_results=8)
+            res = collection.query(query_embeddings=vec_in, n_results=3)
 
-            for idx, dist in enumerate(res["distances"][0]):
-                tname = res["metadatas"][0][idx]["table_name"]
-                if tname in table_score:
-                    table_score[tname] += round(5 - dist, 2)
+            if res["metadatas"] and len(res["metadatas"][0]) > 0:
+                for idx, dist in enumerate(res["distances"][0]):
+                    tname = res["metadatas"][0][idx]["table_name"]
+                    if tname in table_score:
+                        table_score[tname] += round(5 - dist, 2)
 
             # 排序匹配表
             sorted_tbl = sorted(table_score.items(), key=lambda x: x[1], reverse=True)
             match_tables = [t for t, s in sorted_tbl]
 
-            # 產生SQL
+            # 產生 SQL
             sql_text = generate_advanced_sql(user_input, match_tables)
 
             # 儲存紀錄
@@ -419,8 +443,11 @@ if submit_btn:
             if "query_history" not in st.session_state:
                 st.session_state.query_history = []
             st.session_state.query_history.append(new_rec)
-            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-                json.dump(st.session_state.query_history, ensure_ascii=False, indent=2, fp=f)
+            try:
+                with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+                    json.dump(st.session_state.query_history, ensure_ascii=False, indent=2, fp=f)
+            except Exception:
+                pass
 
             # 頁面輸出
             st.success("查詢語句生成完畢")
@@ -428,7 +455,7 @@ if submit_btn:
             for t, s in sorted_tbl:
                 st.write(f"{t} 匹配分數：{s:.1f}")
 
-            st.subheader("自動生成SQL")
+            st.subheader("自動生成 SQL")
             st.code(sql_text, language="sql")
 
             st.subheader("查詢結果")
@@ -436,6 +463,6 @@ if submit_btn:
                 result_df = pysqldf(sql_text)
                 st.dataframe(result_df, use_container_width=True)
             except Exception as err:
-                st.error(f"執行SQL失敗：{str(err)}")
+                st.error(f"執行 SQL 失敗：{str(err)}")
 
-st.caption("按下Enter或點擊按鈕執行查詢")
+st.caption("按下 Enter 或點擊按鈕執行查詢")
