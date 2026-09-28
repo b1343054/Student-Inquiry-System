@@ -284,7 +284,22 @@ def generate_advanced_sql(query_text, matched_tables):
             where_conds.append(c)
             seen.add(c)
 
-   # 學院過濾（智慧相容繁簡：商、醫、理、文、設）
+    # 年級過濾（支援：一年級/大一、二年級/大二、三年級/大三、四年級/大四）
+    grade_map = {
+        "大一": ["一年級", "一年级", "大一", "1年級", "1年级"],
+        "大二": ["二年級", "二年级", "大二", "2年級", "2年级"],
+        "大三": ["三年級", "三年级", "大三", "3年級", "3年级"],
+        "大四": ["四年級", "四年级", "大四", "4年級", "4年级"]
+    }
+    for db_grade, keywords in grade_map.items():
+        if any(kw in query_clean for kw in keywords):
+            c = f"{student_table}.grade = '{db_grade}'"
+            if c not in seen:
+                where_conds.append(c)
+                seen.add(c)
+            break
+
+    # 學院過濾（智慧相容繁簡：商、醫、理、文、設）
     college_map = {
         "商": ["%商%", "%管理%"],
         "醫": ["%醫%", "%医%"],
@@ -292,7 +307,6 @@ def generate_advanced_sql(query_text, matched_tables):
         "文": ["%文%", "%法%"],
         "設": ["%設%", "%设%"]
     }
-    
     for key, patterns in college_map.items():
         if key in query_clean or (key == "醫" and "医" in query_clean) or (key == "設" and "设" in query_clean):
             sub_conds = [f"{student_table}.College_Faculty LIKE '{p}'" for p in patterns]
