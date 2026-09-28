@@ -183,7 +183,6 @@ AGG_KEYWORDS = {
 def init_vector():
     client = chromadb.PersistentClient(path="./chroma_db")
     
-    # 預設的綱要說明文本，若雲端無資料夾時自動建置
     default_docs = [
         "學生基本資料表，包含學號、姓名、性別、年級、學校類型、學院系所等基本背景資訊。",
         "學生手機使用與問卷作答結果表，包含日均螢幕總時長、社交媒體時長、遊戲時長、睡前使用時長、解鎖次數、睡眠時長與自評焦慮等數值。",
@@ -196,25 +195,16 @@ def init_vector():
     ]
     default_ids = ["student_meta", "result_meta", "questions_meta"]
 
-    # 嘗試讀取，不存在則直接自動建立並灌入基礎向量資料
-    try:
-        coll = client.get_collection("db_schema_collection")
-        data = coll.get()
-        if not data["documents"]:
-            coll.add(documents=default_docs, metadatas=default_metadatas, ids=default_ids)
-            docs = default_docs
-        else:
-            docs = data["documents"]
-    except Exception:
-        coll = client.create_collection("db_schema_collection")
+    # 取得或建立集合
+    coll = client.get_or_create_collection("db_schema_collection")
+    
+    # 檢查是否已有資料，若無則寫入基礎資料
+    if coll.count() == 0:
         coll.add(documents=default_docs, metadatas=default_metadatas, ids=default_ids)
-        docs = default_docs
 
-    vec = TfidfVectorizer()
-    vec.fit(docs)
-    return coll, vec
+    return coll
 
-collection, vectorizer = init_vector()
+collection = init_vector()
 
 # ===================== 自然語言轉 SQL 核心函數 =====================
 def generate_advanced_sql(query_text, matched_tables):
@@ -418,8 +408,15 @@ if submit_btn:
                 table_score[tbl] = sc
 
             # 向量匹配，過濾不存在的 table_name
-            vec_in = vectorizer.transform([user_input]).toarray()
-            res = collection.query(query_embeddings=vec_in, n_results=3)
+try:
+    res = collection.query(query_texts=[user_input], n_results=3)
+    if res["metadatas"] and len(res["metadatas"][0]) > 0:
+        for idx, dist in enumerate(res["distances"][0]):
+            tname = res["metadatas"][0][idx]["table_name"]
+            if tname in table_score:
+                table_score[tname] += round(max(0, 5 - dist), 2)
+except Exception:
+    pass
 
             if res["metadatas"] and len(res["metadatas"][0]) > 0:
                 for idx, dist in enumerate(res["distances"][0]):
