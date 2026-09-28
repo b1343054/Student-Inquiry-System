@@ -334,18 +334,20 @@ def generate_advanced_sql(query_text, matched_tables):
                         where_conds.append(c2)
                         seen.add(c2)
 
-        # 數值大於/小於過濾
-        num_match = re.search(r"(超過|大於|小於|等於|大于|小于|高於|低於)\s*(\d+\.?\d*)", query_clean)
+     # 數值大於/小於/高於/低於過濾（完整支援所有比較詞）
+        all_ops = "|".join(GT_WORDS + LT_WORDS + ["等於", "等于", "大于", "小于", "超过", "低于"])
+        num_match = re.search(rf"({all_ops})\s*(\d+\.?\d*)", query_clean)
         if num_match:
             op_txt = num_match.group(1)
             num = num_match.group(2)
-            op = ">" if op_txt in GT_WORDS or op_txt == "大于" else ("<" if op_txt in LT_WORDS or op_txt == "小于" else "=")
+            op = ">" if (op_txt in GT_WORDS or op_txt in ["大于", "超过"]) else ("<" if (op_txt in LT_WORDS or op_txt in ["小于", "低于"]) else "=")
             for kw, col in FIELD_MAP["qustionnaire_result"].items():
                 if clean_text(kw) in clean_text(query_clean):
                     c = f"{secondary_table}.{col} {op} {num}"
                     if c not in seen:
                         where_conds.append(c)
                         seen.add(c)
+                    break
 
         # 自評分數過濾
         score_match = re.search(r"自評.*(\d+)", query_clean)
